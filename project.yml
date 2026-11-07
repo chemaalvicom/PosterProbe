@@ -1,0 +1,33 @@
+name: PosterProbe
+options:
+  bundleIdPrefix: es.alvicom
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+targets:
+  PosterProbe:
+    type: application
+    platform: iOS
+    sources: [PosterProbe]
+    info:
+      path: PosterProbe/Info.plist
+      properties:
+        CFBundleDisplayName: PosterProbe
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSContactsUsageDescription: "PosterProbe lee tus contactos para extraer los Pósters de Contacto y guardarlos en Archivos. Nada sale del iPhone."
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: es.alvicom.posterprobe
+        SWIFT_OBJC_BRIDGING_HEADER: PosterProbe/PosterProbe-Bridging-Header.h
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: "NO"

@@ -1,0 +1,64 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app || sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+
+      - name: XcodeGen
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build (sin firmar)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project PosterProbe.xcodeproj \
+            -scheme PosterProbe \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tee build.log | grep -E "error:|warning: .*Probe|BUILD (SUCCEEDED|FAILED)" || true
+          test -d build/Build/Products/Release-iphoneos/PosterProbe.app
+
+      - name: Empaquetar IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/PosterProbe.app Payload/
+          zip -qry PosterProbe-unsigned.ipa Payload
+          ls -la PosterProbe-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PosterProbe-unsigned
+          path: PosterProbe-unsigned.ipa
+
+      - name: Publicar en release "latest"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest -y --cleanup-tag || true
+          gh release create latest PosterProbe-unsigned.ipa \
+            --title "PosterProbe (sin firmar)" \
+            --notes "IPA sin firmar. Fírmala con ESign con tu certificado. Build ${{ github.sha }}"
+
+      - name: Log de compilación si falla
+        if: failure()
+        run: tail -n 200 build.log || true
