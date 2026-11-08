@@ -36,7 +36,8 @@ final class Probe {
 
     // MARK: - Ejecución completa
 
-    func run(log: @escaping Log, progress: @escaping Progress) throws -> URL {
+    func run(full: Bool, log: @escaping Log, progress: @escaping Progress) throws -> URL {
+        ObjCCatch.mark("preparando carpeta de salida")
         let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let df = DateFormatter()
         df.dateFormat = "yyyyMMdd_HHmmss"
@@ -52,12 +53,14 @@ final class Probe {
         informe.append("")
 
         // 1) Descubrimiento en runtime
+        ObjCCatch.mark("fase 1: descubrimiento de clases")
         let contactProps = ObjCCatch.propertyNames(of: CNContact.self)
         informe.append("== Propiedades de CNContact (\(contactProps.count)) ==")
         informe.append(contactProps.joined(separator: ", "))
         informe.append("")
         for clsName in ["CNWallpaper", "CNWallpaperMetadata", "CNSensitiveContentConfiguration",
                         "CNMemojiMetadata", "PRPosterConfiguration", "PRSPosterArchiver"] {
+            ObjCCatch.mark("fase 1: clase \(clsName)")
             if let cls = NSClassFromString(clsName) {
                 informe.append("== Clase \(clsName) ==")
                 informe.append("Propiedades: " + ObjCCatch.propertyNames(of: cls).joined(separator: ", "))
@@ -74,22 +77,34 @@ final class Probe {
         }
         log("Claves candidatas: \(candidates.count)")
 
+        let informeURL = outDir.appendingPathComponent("informe.txt")
+        func guardarInforme() {
+            try? informe.joined(separator: "\n").write(to: informeURL, atomically: true, encoding: .utf8)
+        }
+        guardarInforme()
+
         // 2) Probar cada clave por separado
         informe.append("")
         informe.append("== Prueba de claves (fetch de 1 contacto) ==")
         var usable: [String] = []
         for key in candidates {
+            ObjCCatch.mark("fase 2: probando clave \(key)")
             let r = testKey(key)
             informe.append("  \(key): \(r ?? "OK")")
             log("\(key): \(r == nil ? "OK" : "✗")")
             if r == nil { usable.append(key) }
         }
         informe.append("")
+        guardarInforme()
 
         if usable.isEmpty {
             informe.append("Ninguna clave interna es accesible desde una app de terceros en este iOS.")
-            try informe.joined(separator: "\n").write(
-                to: outDir.appendingPathComponent("informe.txt"), atomically: true, encoding: .utf8)
+            guardarInforme()
+            return outDir
+        }
+        if !full {
+            informe.append("Modo solo diagnóstico: no se recorre la agenda.")
+            guardarInforme()
             return outDir
         }
 
@@ -116,11 +131,13 @@ final class Probe {
             do {
                 try self.store.enumerateContacts(with: request) { contact, _ in
                     done += 1
+                    ObjCCatch.mark("fase 3: contacto \(done) de \(total) (\(contact.identifier))")
                     if done % 50 == 0 { progress(done, total) }
                     autoreleasepool {
                         var values: [(String, Any)] = []
                         var hasPoster = false
                         for key in usable {
+                            ObjCCatch.mark("fase 3: contacto \(done) (\(contact.identifier)) · clave \(key)")
                             var err: NSString?
                             guard let v = ObjCCatch.value(of: contact, forKey: key, error: &err),
                                   !(v is NSNull) else { continue }
@@ -142,11 +159,16 @@ final class Probe {
                         var meta: [String: Any] = ["nombre": display, "identificador": contact.identifier]
                         var files = 0
                         for (key, v) in values {
-                            meta[key] = self.dump(v, dir: dir, name: key, depth: 0, files: &files)
+                            meta[key] = self.dump(v, dir: dir, name: key, depth: 0, files: &files,
+                                                  crumb: "contacto \(done) (\(contact.identifier))")
                         }
-                        if let json = try? JSONSerialization.data(
-                            withJSONObject: Probe.jsonSafe(meta), options: [.prettyPrinted, .sortedKeys]) {
+                        ObjCCatch.mark("fase 3: contacto \(done) · escribiendo meta.json")
+                        let safeMeta = Probe.jsonSafe(meta)
+                        if let json = ObjCCatch.jsonData(safeMeta) {
                             try? json.write(to: dir.appendingPathComponent("meta.json"))
+                        } else {
+                            try? String(describing: safeMeta).write(
+                                to: dir.appendingPathComponent("meta.txt"), atomically: true, encoding: .utf8)
                         }
                         csv.append("\(display);\(contact.identifier);"
                                    + values.map { $0.0 }.joined(separator: ",") + ";\(files)")
@@ -157,6 +179,7 @@ final class Probe {
             }
         }
         progress(done, total)
+        ObjCCatch.mark("fase 4: escribiendo informe final")
 
         informe.append("== Resultado ==")
         informe.append("Contactos recorridos: \(done) de \(total)")
@@ -167,8 +190,7 @@ final class Probe {
         if let e = enumError { informe.append("Error de enumeración: \(e)") }
         if let e = exc { informe.append("Excepción de enumeración: \(e)") }
 
-        try informe.joined(separator: "\n").write(
-            to: outDir.appendingPathComponent("informe.txt"), atomically: true, encoding: .utf8)
+        guardarInforme()
         try ("\u{FEFF}" + csv.joined(separator: "\n")).write(
             to: outDir.appendingPathComponent("resumen.csv"), atomically: true, encoding: .utf8)
         log("Contactos con póster: \(withPoster)")
@@ -199,7 +221,8 @@ final class Probe {
     // MARK: - Volcado recursivo
 
     /// Escribe datos binarios a disco y devuelve una representación JSON del valor.
-    private func dump(_ v: Any, dir: URL, name: String, depth: Int, files: inout Int) -> Any {
+    private func dump(_ v: Any, dir: URL, name: String, depth: Int, files: inout Int, crumb: String) -> Any {
+        ObjCCatch.mark("fase 3: \(crumb) · volcando \(name)")
         if let d = v as? Data {
             let ext = Probe.sniff(d)
             let url = dir.appendingPathComponent("\(Probe.safe(name)).\(ext)")
@@ -215,35 +238,33 @@ final class Probe {
         if let url = v as? URL { return url.absoluteString }
         if let arr = v as? [Any] {
             return arr.enumerated().map { i, x in
-                dump(x, dir: dir, name: "\(name)_\(i)", depth: depth + 1, files: &files)
+                dump(x, dir: dir, name: "\(name)_\(i)", depth: depth + 1, files: &files, crumb: crumb)
             }
         }
         guard let obj = v as? NSObject else { return String(describing: v) }
 
         var out: [String: Any] = ["$clase": NSStringFromClass(type(of: obj))]
         // Copia archivada completa del objeto (se puede analizar luego en el NAS)
-        var archived: Data?
-        _ = ObjCCatch.run {
-            archived = try? NSKeyedArchiver.archivedData(withRootObject: obj, requiringSecureCoding: false)
-        }
-        if let a = archived {
+        ObjCCatch.mark("fase 3: \(crumb) · archivando \(name)")
+        if let a = ObjCCatch.archive(obj) {
             let url = dir.appendingPathComponent("\(Probe.safe(name)).archive.plist")
             try? a.write(to: url)
             files += 1
             out["$archivo"] = url.lastPathComponent
         }
         if depth >= 3 {
-            out["$descripcion"] = String(obj.description.prefix(2000))
+            out["$descripcion"] = String(ObjCCatch.describe(obj).prefix(2000))
             return out
         }
-        for p in ObjCCatch.propertyNames(of: type(of: obj)) {
+        for p in ObjCCatch.safePropertyNames(of: type(of: obj)) {
             if ["hash", "superclass", "description", "debugDescription"].contains(p) { continue }
+            ObjCCatch.mark("fase 3: \(crumb) · leyendo \(name).\(p)")
             var err: NSString?
             guard let pv = ObjCCatch.value(of: obj, forKey: p, error: &err), !(pv is NSNull) else {
                 if let err = err { out[p] = "⚠︎ \(err)" }
                 continue
             }
-            out[p] = dump(pv, dir: dir, name: "\(name).\(p)", depth: depth + 1, files: &files)
+            out[p] = dump(pv, dir: dir, name: "\(name).\(p)", depth: depth + 1, files: &files, crumb: crumb)
         }
         return out
     }
@@ -283,9 +304,12 @@ final class Probe {
             return r
         case let a as [Any]: return a.map { jsonSafe($0) }
         case let s as String: return s
-        case let n as NSNumber: return n
+        case let n as NSNumber:
+            let d = n.doubleValue
+            return d.isFinite ? n : String(describing: d)
         case let d as Date: return ISO8601DateFormatter().string(from: d)
         case let d as Data: return "<\(d.count) bytes>"
+        case let o as NSObject: return ObjCCatch.describe(o)
         default: return String(describing: v)
         }
     }

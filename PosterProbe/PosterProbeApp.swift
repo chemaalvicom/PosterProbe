@@ -3,6 +3,13 @@ import SwiftUI
 
 @main
 struct PosterProbeApp: App {
+    init() {
+        // Si la app muere, deja la causa y el último paso en Documents/ultimo_cierre.txt
+        let crash = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ultimo_cierre.txt")
+        ObjCCatch.installCrashHandler(path: crash.path)
+    }
+
     var body: some Scene {
         WindowGroup { ContentView() }
     }
@@ -17,10 +24,24 @@ final class Model: ObservableObject {
     @Published var total = 0
     @Published var output: URL?
     @Published var zipURL: URL?
+    @Published var lastCrash: String?
 
     private let probe = Probe()
+    private let crashURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("ultimo_cierre.txt")
 
-    func start() {
+    init() {
+        if let t = try? String(contentsOf: crashURL, encoding: .utf8), !t.isEmpty {
+            lastCrash = t
+            // Se conserva una copia con fecha y se libera el fichero para el siguiente intento
+            let df = DateFormatter(); df.dateFormat = "yyyyMMdd_HHmmss"
+            let copy = crashURL.deletingLastPathComponent()
+                .appendingPathComponent("cierre_\(df.string(from: Date())).txt")
+            try? FileManager.default.moveItem(at: crashURL, to: copy)
+        }
+    }
+
+    func start(full: Bool) {
         guard !running else { return }
         running = true
         lines = []
@@ -42,6 +63,7 @@ final class Model: ObservableObject {
             let result: Result<URL, Error> = await Task.detached(priority: .userInitiated) {
                 Result {
                     try probe.run(
+                        full: full,
                         log: { msg in Task { @MainActor in self.append(msg) } },
                         progress: { d, t in Task { @MainActor in self.done = d; self.total = t } })
                 }
@@ -52,6 +74,7 @@ final class Model: ObservableObject {
                 status = "Comprimiendo…"
                 zipURL = await Task.detached { Probe.zip(url) }.value
                 status = "Terminado. Archivos › En mi iPhone › PosterProbe"
+                ObjCCatch.mark("terminado")
             case .failure(let e):
                 status = "Error: \(e.localizedDescription)"
             }
@@ -76,9 +99,16 @@ struct ContentView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     Button {
-                        m.start()
+                        m.start(full: false)
                     } label: {
-                        Label(m.running ? "Analizando…" : "Analizar contactos", systemImage: "person.crop.rectangle.stack")
+                        Label("1 · Solo diagnóstico (rápido)", systemImage: "stethoscope")
+                    }
+                    .disabled(m.running)
+                    Button {
+                        m.start(full: true)
+                    } label: {
+                        Label(m.running ? "Analizando…" : "2 · Extraer pósters de toda la agenda",
+                              systemImage: "person.crop.rectangle.stack")
                     }
                     .disabled(m.running)
                     if m.total > 0 {
@@ -86,6 +116,12 @@ struct ContentView: View {
                         Text("\(m.done) / \(m.total)").font(.caption).monospacedDigit()
                     }
                     Text(m.status).font(.callout)
+                }
+                if let crash = m.lastCrash {
+                    Section("⚠︎ La app se cerró en el intento anterior") {
+                        Text(crash).font(.caption.monospaced()).textSelection(.enabled)
+                        Button("Copiar") { UIPasteboard.general.string = crash }
+                    }
                 }
                 if let zip = m.zipURL {
                     Section("Resultado") {
